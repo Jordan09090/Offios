@@ -24,6 +24,23 @@
             right: 20px;
             z-index: 1000;
         }
+        #logoPreview {
+            width: 100px;
+            height: 100px;
+            object-fit: cover;
+            border-radius: 8px;
+            border: 2px solid #ddd;
+            display: none;
+            margin-top: 8px;
+        }
+        .admin-logo {
+            width: 50px;
+            height: 50px;
+            object-fit: cover;
+            border-radius: 6px;
+            border: 1px solid #ddd;
+            flex-shrink: 0;
+        }
     </style>
 </head>
 <body>
@@ -47,11 +64,29 @@
                         <label class="form-label">Office Location</label>
                         <input type="text" class="form-control" id="officeLocation" required>
                     </div>
+                    <div class="mb-3">
+                        <label class="form-label">Website URL</label>
+                        <input type="url" class="form-control" id="companyWebsite" placeholder="https://example.com">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Company Logo</label><br>
+                        <input type="file" id="logoInput" accept="image/*" style="display:none">
+                        <button type="button" class="btn btn-outline-secondary btn-sm" onclick="document.getElementById('logoInput').click()">
+                            📁 Upload Logo
+                        </button>
+                        <div>
+                            <img id="logoPreview" alt="Logo preview">
+                        </div>
+                        <small id="logoStatus" class="text-muted"></small>
+                    </div>
                     <button type="submit" class="btn btn-primary">Add Company</button>
                 </form>
             </div>
             <div class="col-md-6">
                 <h2>Current Companies</h2>
+                <div class="mb-3">
+                    <input type="text" class="form-control" id="companySearch" placeholder="Search companies...">
+                </div>
                 <div id="companiesList"></div>
             </div>
         </div>
@@ -115,40 +150,137 @@
             });
         }
 
+        let pendingLogo = null;
+
+        // Center-crop image to square, resize to 200×200, compress to JPEG under 200 KB
+        function processImage(file) {
+            return new Promise((resolve, reject) => {
+                const MAX_BYTES = 200 * 1024;
+                const DIM = 200;
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    const img = new Image();
+                    img.onload = () => {
+                        const canvas = document.createElement('canvas');
+                        canvas.width = DIM;
+                        canvas.height = DIM;
+                        const ctx = canvas.getContext('2d');
+                        const size = Math.min(img.width, img.height);
+                        const sx = (img.width - size) / 2;
+                        const sy = (img.height - size) / 2;
+                        ctx.drawImage(img, sx, sy, size, size, 0, 0, DIM, DIM);
+                        let quality = 0.8;
+                        let base64 = canvas.toDataURL('image/jpeg', quality);
+                        while (base64.length > MAX_BYTES && quality > 0.1) {
+                            quality = Math.round((quality - 0.1) * 10) / 10;
+                            base64 = canvas.toDataURL('image/jpeg', quality);
+                        }
+                        if (base64.length > MAX_BYTES) {
+                            reject(new Error('Image is still too large after compression. Please choose a smaller image.'));
+                        } else {
+                            resolve(base64);
+                        }
+                    };
+                    img.onerror = () => reject(new Error('Could not load image.'));
+                    img.src = e.target.result;
+                };
+                reader.onerror = () => reject(new Error('Could not read file.'));
+                reader.readAsDataURL(file);
+            });
+        }
+
+        document.getElementById('logoInput').addEventListener('change', async (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            const statusEl = document.getElementById('logoStatus');
+            const previewEl = document.getElementById('logoPreview');
+            statusEl.textContent = 'Processing…';
+            try {
+                const base64 = await processImage(file);
+                pendingLogo = base64;
+                previewEl.src = base64;
+                previewEl.style.display = 'inline-block';
+                statusEl.textContent = `✓ Ready (${(base64.length / 1024).toFixed(1)} KB)`;
+            } catch (err) {
+                pendingLogo = null;
+                previewEl.style.display = 'none';
+                statusEl.textContent = err.message;
+                showToast(err.message, 'danger');
+            }
+        });
+
         // Update company form submission
         document.getElementById('companyForm').addEventListener('submit', (e) => {
             e.preventDefault();
             const companyName = document.getElementById('companyName').value;
             const officeLocation = document.getElementById('officeLocation').value;
+            const companyWebsite = document.getElementById('companyWebsite').value.trim();
 
-            push(ref(db, 'companies'), {
+            const data = {
                 name: companyName,
                 location: officeLocation,
                 timestamp: Date.now()
-            }).then(() => {
+            };
+            if (companyWebsite) data.website = companyWebsite;
+            if (pendingLogo) data.logo = pendingLogo;
+
+            push(ref(db, 'companies'), data).then(() => {
                 showToast('Company added successfully');
                 e.target.reset();
+                pendingLogo = null;
+                document.getElementById('logoPreview').style.display = 'none';
+                document.getElementById('logoPreview').src = '';
+                document.getElementById('logoStatus').textContent = '';
             }).catch(error => {
                 showToast('Error adding company: ' + error.message, 'danger');
             });
         });
 
         // Display companies
-        onValue(ref(db, 'companies'), (snapshot) => {
+        let allCompanies = [];
+
+        function renderCompanies(filter = '') {
             const companiesList = document.getElementById('companiesList');
             companiesList.innerHTML = '';
+            const term = filter.toLowerCase().trim();
+            const filtered = term
+                ? allCompanies.filter(c => c.name.toLowerCase().includes(term))
+                : allCompanies;
 
-            snapshot.forEach((childSnapshot) => {
-                const company = childSnapshot.val();
+            if (filtered.length === 0) {
+                companiesList.innerHTML = '<p class="text-muted">No companies found.</p>';
+                return;
+            }
+
+            filtered.forEach(({ key, name, location, website, logo }) => {
                 const div = document.createElement('div');
                 div.className = 'company-card';
                 div.innerHTML = `
-                    <h4>${company.name}</h4>
-                    <p>Location: ${company.location}</p>
-                    <button class="btn btn-danger btn-sm" onclick="removeCompany('${childSnapshot.key}')">Remove</button>
+                    <div class="d-flex align-items-center gap-3 mb-2">
+                        ${logo ? `<img src="${logo}" class="admin-logo" alt="${name} logo">` : ''}
+                        <h4 class="mb-0">${name}</h4>
+                    </div>
+                    <p class="mb-1">Location: ${location}</p>
+                    ${website ? `<p class="mb-1"><a href="${website}" target="_blank" rel="noopener noreferrer">${website}</a></p>` : ''}
+                    <button class="btn btn-danger btn-sm mt-1" onclick="removeCompany('${key}')">Remove</button>
                 `;
                 companiesList.appendChild(div);
             });
+        }
+
+        onValue(ref(db, 'companies'), (snapshot) => {
+            allCompanies = [];
+            snapshot.forEach((childSnapshot) => {
+                const company = childSnapshot.val();
+                allCompanies.push({ key: childSnapshot.key, name: company.name, location: company.location, website: company.website || '', logo: company.logo || '' });
+            });
+            // Sort alphabetically by company name
+            allCompanies.sort((a, b) => a.name.localeCompare(b.name));
+            renderCompanies(document.getElementById('companySearch').value);
+        });
+
+        document.getElementById('companySearch').addEventListener('input', (e) => {
+            renderCompanies(e.target.value);
         });
 
         // Update remove company function
